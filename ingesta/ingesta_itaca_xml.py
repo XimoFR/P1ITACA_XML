@@ -1,172 +1,99 @@
-from pathlib import Path
 import hashlib
 import json
 import logging
 import xml.etree.ElementTree as ET
 from datetime import date
+from pathlib import Path
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger("ingesta_itaca_xml")
 
-CARPETA_ORIGEN = Path(
-    r"C:\Users\ximof\Desktop\R_IA_BIGDATA\BigData_Aplicado\Analisis_Academico"
-)
+CARPETA_ORIGEN = Path("data/exportaciones")
 CARPETA_SALIDA = Path("data/raw")
 
-ANOS = ["2021-22", "2022-23", "2023-24", "2024-25", "2025-26"]
-TABLAS_ORIGEN = ["alumnos", "calificaciones", "contenidos", "cursos", "grupos"]
+TABLAS = ["cursos", "alumnos", "contenidos", "calificaciones"]
+CAMPOS = {
+    "cursos": ["codigo", "nombre_cas", "nombre_val", "abreviatura", "ensenanza", "padre"],
+    "alumnos": ["NIA", "sexo", "nacionalidad", "provincia", "municipio", "ensenanza",
+                "curso", "grupo", "turno", "linea", "modalidad", "repite",
+                "estado_matricula", "tipo_matricula", "fecha_matricula",
+                "fecha_ingreso_centro"],
+    "contenidos": ["codigo", "nombre_cas", "nombre_val", "ensenanza", "curso"],
+    "calificaciones": ["evaluacion", "alumno", "ensenanza", "curso", "contenido",
+                       "bloque_contenido", "nota_numerica", "tipo_nota"],
+}
+# Campos que contienen un NIA y deben anonimizarse
+CAMPO_NIA = {"alumnos": "NIA", "calificaciones": "alumno"}
 
 
 def anonimizar_nia(nia: str) -> str:
-    """Genera el identificador seudonimizado consistente para un NIA."""
-    return hashlib.sha256(str(nia).encode("utf-8")).hexdigest()[:10]
+    return hashlib.sha256(str(nia).encode()).hexdigest()[:10]
 
 
-def leer_xml(ruta: Path) -> list[dict]:
-    """Lee los atributos de los registros contenidos en el XML."""
-    arbol = ET.parse(ruta)
-    raiz = arbol.getroot()
+def parsear_xml(ruta: Path, tabla: str) -> list[dict]:
+    """Devuelve los registros de la tabla; Anyo es el campo curso de la cabecera."""
+    raiz = ET.parse(ruta).getroot()
+    anyo = raiz.get("curso")
     registros = []
-
-    for seccion in raiz:
-        for nodo in seccion:
-            registros.append(dict(nodo.attrib))
-
+    for nodo in raiz.find(tabla):
+        fila = {"Anyo": anyo}
+        for campo in CAMPOS[tabla]:
+            fila[campo] = (nodo.get(campo) or "").strip() or None
+        if tabla in CAMPO_NIA:
+            campo = CAMPO_NIA[tabla]
+            fila[campo] = anonimizar_nia(nodo.get(campo))
+        registros.append(fila)
     return registros
 
 
-def preparar_tabla(tabla: str, registros: list[dict], anyo: str) -> list[dict]:
-    """Transforma los registros de origen al esquema de salida."""
-    resultado = []
-
-    for registro in registros:
-        if tabla == "alumnos":
-            fila = {
-                "Anyo": anyo,
-                "NIA": anonimizar_nia(registro["NIA"]),
-                "Curso": registro.get("curso"),
-                "Grupo": registro.get("grupo"),
-                "Turno": registro.get("turno"),
-                "Ensenanza": registro.get("ensenanza"),
-                "Linea": registro.get("linea"),
-                "Modalidad": registro.get("modalidad"),
-            }
-
-        elif tabla == "calificaciones":
-            fila = {
-                "Anyo": anyo,
-                "NIA": anonimizar_nia(registro["alumno"]),
-                "Curso": registro.get("curso"),
-                "Modulo": registro.get("contenido"),
-                "Nota": registro.get("nota_numerica"),
-                "Evaluacion": registro.get("evaluacion"),
-            }
-
-        elif tabla == "contenidos":
-            fila = {
-                "Anyo": anyo,
-                "Curso": registro.get("curso"),
-                "Modulo": registro.get("codigo"),
-                "Nombre_Modulo": registro.get("nombre_cas"),
-            }
-
-        elif tabla == "grupos":
-            fila = {
-                "Anyo": anyo,
-                "Codigo": registro.get("codigo"),
-                "Nombre": registro.get("nombre"),
-                "Ensenanza": registro.get("ensenanza"),
-                "Linea": registro.get("linea"),
-                "Turno": registro.get("turno"),
-                "Modalidad": registro.get("modalidad"),
-                "Aula": registro.get("aula"),
-                "Capacidad": registro.get("capacidad"),
-            }
-
-        elif tabla == "cursos":
-            # Se conserva como fuente auxiliar para documentar y
-            # contrastar los cursos; no equivale a una tabla de horas.
-            fila = {
-                "Anyo": anyo,
-                "Codigo": registro.get("codigo"),
-                "Nombre_Cas": registro.get("nombre_cas"),
-                "Nombre_Val": registro.get("nombre_val"),
-                "Abreviatura": registro.get("abreviatura"),
-                "Ensenanza": registro.get("ensenanza"),
-                "Padre": registro.get("padre"),
-            }
-
-        else:
-            raise ValueError(f"Tabla de origen desconocida: {tabla}")
-
-        resultado.append(fila)
-
-    return resultado
+def codigos_grupos(ruta: Path) -> set[tuple]:
+    """grupos.xml solo se usa para validar alumnos.grupo; no se guarda."""
+    raiz = ET.parse(ruta).getroot()
+    return {(raiz.get("curso"), g.get("codigo")) for g in raiz.find("grupos")}
 
 
-def guardar_json(datos: list[dict], tabla: str, anyo: str) -> None:
-    """Guarda los registros como JSON en la zona raw."""
+def guardar(datos: list[dict], nombre: str) -> None:
     CARPETA_SALIDA.mkdir(parents=True, exist_ok=True)
-    ruta = CARPETA_SALIDA / f"{tabla}_{anyo}_{date.today().isoformat()}.json"
-
-    with ruta.open("w", encoding="utf-8") as archivo:
-        json.dump(datos, archivo, ensure_ascii=False, indent=2)
-
-    logger.info("%s (%s): %d registros guardados", tabla, anyo, len(datos))
+    ruta = CARPETA_SALIDA / f"{nombre}_{date.today().isoformat()}.json"
+    with ruta.open("w", encoding="utf-8") as f:
+        json.dump(datos, f, ensure_ascii=False, indent=2)
+    logger.info("Guardados %d registros en %s", len(datos), ruta)
 
 
-def ejecutar_ingesta() -> None:
-    """Procesa todos los años y genera las cinco tablas de salida."""
-    errores = 0
+def validar(datos: dict[str, list[dict]], grupos: set[tuple]) -> None:
+    """Comprueba la coherencia entre tablas (todas las claves incluyen Anyo)."""
+    nias = {(a["Anyo"], a["NIA"]) for a in datos["alumnos"]}
+    contenidos = {(c["Anyo"], c["codigo"], c["curso"]) for c in datos["contenidos"]}
+    cursos = {(c["Anyo"], c["codigo"]) for c in datos["cursos"]}
 
-    for anyo in ANOS:
-        datos_ano = {}
-
-        for tabla in TABLAS_ORIGEN:
-            ruta = CARPETA_ORIGEN / anyo / f"{tabla}.xml"
-
-            try:
-                registros = leer_xml(ruta)
-                datos_ano[tabla] = preparar_tabla(tabla, registros, anyo)
-                logger.info("%s (%s): %d registros leídos",
-                            tabla, anyo, len(registros))
-
-            except (OSError, ET.ParseError, KeyError, ValueError) as error:
-                errores += 1
-                logger.error("Error procesando %s: %s", ruta, error)
-
-        # No generar salidas incompletas para un año si falta una fuente.
-        if len(datos_ano) != len(TABLAS_ORIGEN):
-            logger.error("Se omiten las salidas de %s por errores de ingesta", anyo)
-            continue
-
-        # Tablas que sí están respaldadas por los XML.
-        salidas = {
-            "alumnos": datos_ano["alumnos"],
-            "modulos": datos_ano["contenidos"],
-            "calificaciones": datos_ano["calificaciones"],
-            "grupos": datos_ano["grupos"],
-        }
-
-        for nombre, datos in salidas.items():
-            guardar_json(datos, nombre, anyo)
-
-        # La fuente no contiene horas lectivas explícitas. Se crea
-        # un JSON vacío para reflejar la limitación sin inventar datos.
-        guardar_json([], "horas", anyo)
-
-    logger.info(
-        "Ingesta finalizada. Errores detectados: %d. "
-        "La tabla horas queda vacía porque la fuente no aporta esos datos.",
-        errores,
-    )
-
-    if errores:
-        raise SystemExit(1)
+    comprobaciones = {
+        "calificaciones.alumno en alumnos": sum(
+            (c["Anyo"], c["alumno"]) not in nias for c in datos["calificaciones"]),
+        "calificaciones.contenido en contenidos": sum(
+            (c["Anyo"], c["contenido"], c["curso"]) not in contenidos
+            for c in datos["calificaciones"]),
+        "alumnos.grupo en grupos": sum(
+            a["grupo"] is not None and (a["Anyo"], a["grupo"]) not in grupos
+            for a in datos["alumnos"]),
+        "alumnos.curso en cursos": sum(
+            (a["Anyo"], a["curso"]) not in cursos for a in datos["alumnos"]),
+        "contenidos.curso en cursos": sum(
+            (c["Anyo"], c["curso"]) not in cursos for c in datos["contenidos"]),
+    }
+    for nombre, huerfanos in comprobaciones.items():
+        if huerfanos:
+            logger.warning("Validación %s: %d registros huérfanos", nombre, huerfanos)
+        else:
+            logger.info("Validación %s: OK", nombre)
 
 
 if __name__ == "__main__":
-    ejecutar_ingesta()
+    datos = {tabla: [] for tabla in TABLAS}
+    grupos = set()
+    for carpeta in sorted(p for p in CARPETA_ORIGEN.iterdir() if p.is_dir()):
+        for tabla in TABLAS:
+            datos[tabla] += parsear_xml(carpeta / f"{tabla}.xml", tabla)
+        grupos |= codigos_grupos(carpeta / "grupos.xml")
+    for tabla in TABLAS:
+        guardar(datos[tabla], tabla)
+    validar(datos, grupos)

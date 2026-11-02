@@ -1,45 +1,55 @@
-## Bloque 1. Ingesta de datos académicos de ITACA
+# Proyecto 1 - ITACA (XML)
 
-### Fuentes de datos
+## Fuentes de datos
 
-La práctica utiliza exportaciones XML de datos académicos correspondientes a los cursos 2021-22, 2022-23, 2023-24, 2024-25 y 2025-26. Los archivos de origen son `alumnos.xml`, `calificaciones.xml`, `contenidos.xml`, `cursos.xml` y `grupos.xml`, organizados por curso académico.
+**Mecanismo de acceso.** Exportación XML de ITACA. No requiere credenciales: los ficheros se colocan en `data/exportaciones/<curso>/<tabla>.xml` (cursos 2021-22 a 2025-26, centro CIPFP Mislata). Cada XML tiene una cabecera `<centro ... curso="2025" ...>`; ese atributo `curso` es el campo `Anyo` de las tablas.
 
-El proceso se ejecuta mediante Python y la biblioteca estándar `xml.etree.ElementTree`. Los registros se transforman a diccionarios y se guardan en formato JSON dentro de `data/raw/`. La actualización se realiza cuando se dispone de nuevas exportaciones.
+| Tabla | Fichero | Campos ingestados (además de `Anyo`) |
+|---|---|---|
+| cursos | `cursos.xml` | codigo, nombre_cas, nombre_val, abreviatura, ensenanza, padre |
+| alumnos | `alumnos.xml` | NIA, sexo, nacionalidad, provincia, municipio, ensenanza, curso, grupo, turno, linea, modalidad, repite, estado_matricula, tipo_matricula, fecha_matricula, fecha_ingreso_centro |
+| contenidos (módulos) | `contenidos.xml` | codigo, nombre_cas, nombre_val, ensenanza, curso |
+| calificaciones | `calificaciones.xml` | evaluacion, alumno, ensenanza, curso, contenido, bloque_contenido, nota_numerica, tipo_nota |
 
-### Proceso de ingesta
+`grupos.xml` se lee solo para validar que cada `alumnos.grupo` existe; no se guarda en `data/raw/`.
 
-El script `ingesta/ingesta_itaca_xml.py` procesa los archivos XML, adapta los campos disponibles y registra el resultado mediante el módulo `logging`.
+**Frecuencia de actualización.** Una exportación por curso académico (anual); la de calificaciones se puede refrescar tras cada evaluación.
 
-Se generan las siguientes salidas:
+## Bitácora de prácticas → Bloque 1
 
-- **Alumnos:** identificador seudonimizado, curso académico, curso, grupo, turno, enseñanza, línea y modalidad.
-- **Modulos:** código del contenido, curso académico, curso y nombre del módulo.
-- **Calificaciones:** identificador seudonimizado del alumno, curso, módulo, nota y evaluación.
-- **Grupos:** código, nombre, enseñanza, línea, turno, modalidad, aula y capacidad.
-- **Horas:** archivo JSON vacío, dado que las exportaciones disponibles no contienen datos explícitos de horas lectivas.
+### Proceso
 
-Los campos que no están presentes en los XML no se inventan. El archivo `cursos.xml` se utiliza como fuente auxiliar y no se confunde con información de horas lectivas.
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+python ingesta/ingesta_itaca_xml.py
+```
 
-### Seudonimización y privacidad
+El script (solo biblioteca estándar) recorre `data/exportaciones/*/`, parsea las cuatro tablas con `xml.etree.ElementTree`, junta los cinco cursos en una sola tabla (columna `Anyo`) y guarda un JSON por tabla en `data/raw/<tabla>_<fecha>.json`. Los valores vacíos de ITACA (`" "`) se guardan como `null`.
 
-Antes de guardar los datos, el NIA se transforma mediante SHA-256, conservando los primeros diez caracteres hexadecimales del hash. Se aplica la misma función a los identificadores presentes en Alumnos y Calificaciones para mantener la posibilidad de relacionar ambas tablas.
+Resultado de la última ejecución: 413 cursos, 7.193 alumnos, 1.688 contenidos y 106.814 calificaciones.
 
-Este procedimiento es una seudonimización, no una garantía de anonimización irreversible. Los archivos generados excluyen los campos personales directos que no son necesarios para el análisis.
+### Anonimización
 
-### Validación
+El NIA se sustituye por `sha256(NIA)[:10]` tanto en `alumnos.NIA` como en `calificaciones.alumno`, con la misma función, así que ambas tablas se pueden seguir cruzando. No se ingestan nombre, apellidos, documento, fecha de nacimiento, teléfonos ni emails. Se verificó que ningún NIA ni documento original aparece en `data/raw/`.
 
-La validación se realiza con `ingesta/validar_ingesta.py`. Se comprueba la existencia de los JSON esperados, su estructura, los campos personales detectables y las relaciones entre alumnos, calificaciones, módulos y grupos.
+Decisión: sexo, nacionalidad, provincia, municipio y fechas de matrícula se conservan porque el enunciado los pide; son datos de bajo riesgo pero, combinados, podrían reidentificar. Es seudonimización, no anonimización irreversible.
 
-La relación de grupos se establece mediante `Alumnos.Grupo` y `Grupos.Codigo`. En la revisión de los cursos 2022-23 a 2025-26 se encontraron coincidencias entre los valores no vacíos de ambos campos.
+### Verificación de claves
 
-En el curso 2023-24 se detectaron nueve identificadores seudonimizados en Calificaciones que no aparecen en la tabla Alumnos del mismo curso. Esta incidencia se conserva como advertencia pendiente de aclaración, sin eliminar ni modificar registros de origen.
+El script valida al final de la ejecución (las claves incluyen `Anyo`):
 
-### Limitaciones
-
-La fuente disponible no aporta información explícita de horas lectivas, por lo que la tabla Horas se genera vacía. Antes de completar esta tabla será necesario obtener una fuente que contenga dichos datos.
-
-La correspondencia de módulos se basa en el código de `contenidos.xml` y el campo `contenido` de `calificaciones.xml`. Las relaciones deben revisarse cuando cambien los formatos de las exportaciones.
+- calificaciones → contenidos (contenido + curso): OK
+- alumnos → grupos: OK
+- alumnos → cursos y contenidos → cursos: OK
+- calificaciones → alumnos: **188 calificaciones de 9 alumnos del curso 2023 no tienen registro en alumnos.** Probablemente son alumnos con calificación pero sin matrícula en la exportación de ese año. Se deja como advertencia; no se eliminan ni modifican datos en raw.
 
 ### Evidencias
 
-La ejecución de la ingesta y de la validación se comprueba desde el terminal integrado de VS Code. Las capturas de las ejecuciones satisfactorias se pueden incorporar como evidencia de la práctica.
+Ejecución de `ingesta_itaca_xml.py`:
+
+![Ejecución de la ingesta](docs/img/ejecucion_ingesta.png)
+
+JSON generados en `data/raw/` (excluidos de Git, solo evidencia local):
+
+![JSON en data/raw](docs/img/json_raw.png)
